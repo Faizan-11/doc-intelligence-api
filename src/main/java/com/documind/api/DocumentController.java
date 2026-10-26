@@ -1,35 +1,50 @@
 
 package com.documind.api;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.documind.api.entity.Document;
 import com.documind.api.repository.DocumentRepository;
-
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.PositiveOrZero;
-import jakarta.validation.constraints.Size;
+import com.documind.api.service.FileStorageService;
 
 @RestController
 @RequestMapping("/api/documents")
 public class DocumentController {
 
-    private final DocumentRepository documentRepository;
+    private static final long MAX_FILE_SIZE = 10L * 1024 * 1024;
 
-    public DocumentController(DocumentRepository documentRepository) {
+    private static final List<String> ALLOWED_EXTENSIONS =
+            List.of(".pdf", ".txt", ".md", ".doc", ".docx");
+
+    private final DocumentRepository documentRepository;
+    private final FileStorageService fileStorageService;
+
+    public DocumentController(
+            DocumentRepository documentRepository,
+            FileStorageService fileStorageService
+    ) {
         this.documentRepository = documentRepository;
+        this.fileStorageService = fileStorageService;
     }
 
     @GetMapping
@@ -37,32 +52,152 @@ public class DocumentController {
         return documentRepository.findAll();
     }
 
-    @PostMapping
-    public Document createDocument(@Valid @RequestBody CreateDocumentRequest request) {
-        Document document = new Document(
-                request.fileName(),
-                request.fileSize(),
-                request.contentType()
-        );
+    @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Document uploadDocument(
+            @RequestPart("file") MultipartFile file
+    ) {
+        validateFile(file);
 
-        return documentRepository.save(document);
+        String originalName = file.getOriginalFilename();
+        String safeFileName = Path.of(originalName).getFileName().toString();
+
+        String storageFileName;
+
+        try {
+            storageFileName = fileStorageService.store(file);
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Unable to store uploaded file.",
+                    exception
+            );
+        }
+
+        try {
+            Document document = new Document(
+                    safeFileName,
+                    file.getSize(),
+                    file.getContentType(),
+                    storageFileName
+            );
+
+            return documentRepository.save(document);
+        } catch (RuntimeException databaseException) {
+            try {
+                fileStorageService.delete(storageFileName);
+            } catch (IOException cleanupException) {
+                databaseException.addSuppressed(cleanupException);
+            }
+
+            throw databaseException;
+        }
+    }
+
+    @GetMapping("/{id}/download")
+    public ResponseEntity<Resource> downloadDocument(
+            @PathVariable UUID id
+    ) {
+        Document document = findDocument(id);
+
+        try {
+            Path path = fileStorageService.resolve(
+                    document.getStorageFileName()
+            );
+
+            Resource resource = new UrlResource(path.toUri());
+
+            if (!resource.exists() || !resource.isReadable()) {
+                throw new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Stored file not found."
+                );
+            }
+
+            String contentType = document.getContentType() == null
+                    ? MediaType.APPLICATION_OCTET_STREAM_VALUE
+                    : document.getContentType();
+
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .header(
+                            HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"" +
+                                    document.getFileName().replace("\"", "") +
+                                    "\""
+                    )
+                    .body(resource);
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Unable to read stored file.",
+                    exception
+            );
+        }
     }
 
     @DeleteMapping("/{id}")
     public void deleteDocument(@PathVariable UUID id) {
-        if (!documentRepository.existsById(id)) {
+        Document document = findDocument(id);
+
+        // Delete the database record first. If this fails, the physical file
+        // remains available rather than leaving a record pointing to no file.
+        documentRepository.delete(document);
+        documentRepository.flush();
+
+        try {
+            fileStorageService.delete(document.getStorageFileName());
+        } catch (IOException exception) {
             throw new ResponseStatusException(
-                    HttpStatus.NOT_FOUND,
-                    "Document not found"
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "The database record was deleted, but the stored file could not be removed.",
+                    exception
+            );
+        }
+    }
+
+    private Document findDocument(UUID id) {
+        return documentRepository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Document not found"
+                ));
+    }
+
+    private void validateFile(MultipartFile file) {
+        if (file.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "The uploaded file is empty."
             );
         }
 
-        documentRepository.deleteById(id);
-    }
+        if (file.getSize() > MAX_FILE_SIZE) {
+            throw new ResponseStatusException(
+                    HttpStatus.PAYLOAD_TOO_LARGE,
+                    "Maximum file size is 10 MiB."
+            );
+        }
 
-    public record CreateDocumentRequest(
-            @NotBlank @Size(max = 255) String fileName,
-            @PositiveOrZero long fileSize,
-            @Size(max = 255) String contentType
-    ) {}
+        String originalName = file.getOriginalFilename();
+
+        if (originalName == null || originalName.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "A filename is required."
+            );
+        }
+
+        String lowerName = originalName.toLowerCase(Locale.ROOT);
+        int dotIndex = lowerName.lastIndexOf('.');
+        String extension = dotIndex >= 0
+                ? lowerName.substring(dotIndex)
+                : "";
+
+        if (!ALLOWED_EXTENSIONS.contains(extension)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Unsupported file type. Allowed: PDF, TXT, MD, DOC, DOCX."
+            );
+        }
+    }
 }

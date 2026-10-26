@@ -28,6 +28,9 @@ public class Document {
     @Column(length = 255)
     private String contentType;
 
+    @Column(nullable = false, unique = true, length = 255)
+    private String storageFileName;
+
     @Column(nullable = false, updatable = false)
     private Instant uploadedAt;
 
@@ -38,11 +41,13 @@ public class Document {
     public Document(
             String fileName,
             long fileSize,
-            String contentType
+            String contentType,
+            String storageFileName
     ) {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.contentType = contentType;
+        this.storageFileName = storageFileName;
         this.uploadedAt = Instant.now();
     }
 
@@ -60,6 +65,10 @@ public class Document {
 
     public String getContentType() {
         return contentType;
+    }
+
+    public String getStorageFileName() {
+        return storageFileName;
     }
 
     public Instant getUploadedAt() {
