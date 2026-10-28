@@ -56,6 +56,44 @@ public class DocumentController {
         return documentRepository.findAll();
     }
 
+
+@GetMapping("/search")
+public List<Document> searchDocuments(
+        @org.springframework.web.bind.annotation.RequestParam String keyword
+) {
+    if (keyword == null || keyword.isBlank()) {
+        throw new ResponseStatusException(
+                HttpStatus.BAD_REQUEST,
+                "Search keyword must not be blank."
+        );
+    }
+
+    return documentRepository.findByExtractedTextContainingIgnoreCase(
+            keyword.trim()
+    );
+}
+
+
+
+@GetMapping("/{id}/text")
+public ResponseEntity<String> getExtractedText(@PathVariable UUID id) {
+    Document document = findDocument(id);
+
+    String extractedText = document.getExtractedText();
+
+    if (extractedText == null) {
+        throw new ResponseStatusException(
+                HttpStatus.UNPROCESSABLE_ENTITY,
+                "Extracted text is not available for this document."
+        );
+    }
+
+    return ResponseEntity.ok()
+            .contentType(MediaType.TEXT_PLAIN)
+            .body(extractedText);
+}
+
+
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public Document uploadDocument(
             @RequestPart("file") MultipartFile file
