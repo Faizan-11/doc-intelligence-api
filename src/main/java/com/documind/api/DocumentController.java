@@ -26,6 +26,7 @@ import org.springframework.web.server.ResponseStatusException;
 import com.documind.api.entity.Document;
 import com.documind.api.repository.DocumentRepository;
 import com.documind.api.service.FileStorageService;
+import com.documind.api.service.TextExtractionService;
 
 @RestController
 @RequestMapping("/api/documents")
@@ -38,13 +39,16 @@ public class DocumentController {
 
     private final DocumentRepository documentRepository;
     private final FileStorageService fileStorageService;
+    private final TextExtractionService textExtractionService;
 
     public DocumentController(
             DocumentRepository documentRepository,
-            FileStorageService fileStorageService
+            FileStorageService fileStorageService,
+            TextExtractionService textExtractionService
     ) {
         this.documentRepository = documentRepository;
         this.fileStorageService = fileStorageService;
+        this.textExtractionService = textExtractionService;
     }
 
     @GetMapping
@@ -81,15 +85,40 @@ public class DocumentController {
                     storageFileName
             );
 
+            String lowerName = safeFileName.toLowerCase(Locale.ROOT);
+
+            if (lowerName.endsWith(".pdf")
+                    || lowerName.endsWith(".txt")
+                    || lowerName.endsWith(".md")) {
+
+                Path storedPath = fileStorageService.resolve(storageFileName);
+
+                String extractedText = textExtractionService.extractText(
+                        storedPath,
+                        safeFileName
+                );
+
+                document.setExtractedText(extractedText);
+            }
+
             return documentRepository.save(document);
-        } catch (RuntimeException databaseException) {
+
+        } catch (IOException | RuntimeException exception) {
             try {
                 fileStorageService.delete(storageFileName);
             } catch (IOException cleanupException) {
-                databaseException.addSuppressed(cleanupException);
+                exception.addSuppressed(cleanupException);
             }
 
-            throw databaseException;
+            if (exception instanceof ResponseStatusException responseException) {
+                throw responseException;
+            }
+
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Unable to process the uploaded document.",
+                    exception
+            );
         }
     }
 
@@ -126,6 +155,7 @@ public class DocumentController {
                                     "\""
                     )
                     .body(resource);
+
         } catch (IOException exception) {
             throw new ResponseStatusException(
                     HttpStatus.INTERNAL_SERVER_ERROR,
@@ -139,8 +169,6 @@ public class DocumentController {
     public void deleteDocument(@PathVariable UUID id) {
         Document document = findDocument(id);
 
-        // Delete the database record first. If this fails, the physical file
-        // remains available rather than leaving a record pointing to no file.
         documentRepository.delete(document);
         documentRepository.flush();
 

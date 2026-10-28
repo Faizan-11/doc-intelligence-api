@@ -34,6 +34,9 @@ public class Document {
     @Column(nullable = false, updatable = false)
     private Instant uploadedAt;
 
+    @Column(columnDefinition = "TEXT")
+    private String extractedText;
+
     protected Document() {
         // Required by JPA.
     }
@@ -73,5 +76,13 @@ public class Document {
 
     public Instant getUploadedAt() {
         return uploadedAt;
+    }
+
+    public String getExtractedText() {
+        return extractedText;
+    }
+
+    public void setExtractedText(String extractedText) {
+        this.extractedText = extractedText;
     }
 }
