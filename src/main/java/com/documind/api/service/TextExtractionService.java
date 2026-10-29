@@ -19,20 +19,25 @@ public class TextExtractionService {
             throws IOException {
 
         String fileName = originalFileName.toLowerCase(Locale.ROOT);
+        String extractedText;
 
         if (fileName.endsWith(".txt") || fileName.endsWith(".md")) {
-            return Files.readString(filePath, StandardCharsets.UTF_8);
-        }
-
-        if (fileName.endsWith(".pdf")) {
+            extractedText = Files.readString(
+                    filePath,
+                    StandardCharsets.UTF_8
+            );
+        } else if (fileName.endsWith(".pdf")) {
             try (PDDocument document = Loader.loadPDF(filePath.toFile())) {
                 PDFTextStripper textStripper = new PDFTextStripper();
-                return textStripper.getText(document);
+                extractedText = textStripper.getText(document);
             }
+        } else {
+            throw new IllegalArgumentException(
+                    "Text extraction is not supported for this file type yet."
+            );
         }
 
-        throw new IllegalArgumentException(
-                "Text extraction is not supported for this file type yet."
-        );
+        // PostgreSQL TEXT columns cannot store NUL characters.
+        return extractedText.replace("\u0000", "");
     }
 }
