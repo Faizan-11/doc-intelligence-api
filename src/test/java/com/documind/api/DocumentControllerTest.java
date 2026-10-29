@@ -13,6 +13,7 @@ import com.documind.api.entity.Document;
 import com.documind.api.repository.DocumentRepository;
 import com.documind.api.service.FileStorageService;
 import com.documind.api.service.TextExtractionService;
+import com.documind.api.service.DocumentIngestionService;
 
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -33,14 +34,19 @@ class DocumentControllerTest {
 
     private final TextExtractionService textExtractionService =
             mock(TextExtractionService.class);
+            
+    private final DocumentIngestionService documentIngestionService =
+        mock(DocumentIngestionService.class);
 
     private final MockMvc mockMvc = MockMvcBuilders
             .standaloneSetup(new DocumentController(
                     documentRepository,
                     fileStorageService,
-                    textExtractionService
+                    textExtractionService,
+                    documentIngestionService
             ))
             .build();
+
 
     @Test
     void searchReturnsMatchingDocuments() throws Exception {

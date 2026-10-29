@@ -27,6 +27,7 @@ import com.documind.api.entity.Document;
 import com.documind.api.repository.DocumentRepository;
 import com.documind.api.service.FileStorageService;
 import com.documind.api.service.TextExtractionService;
+import com.documind.api.service.DocumentIngestionService;
 
 @RestController
 @RequestMapping("/api/documents")
@@ -38,18 +39,21 @@ public class DocumentController {
             List.of(".pdf", ".txt", ".md", ".doc", ".docx");
 
     private final DocumentRepository documentRepository;
-    private final FileStorageService fileStorageService;
-    private final TextExtractionService textExtractionService;
+private final FileStorageService fileStorageService;
+private final TextExtractionService textExtractionService;
+private final DocumentIngestionService documentIngestionService;
 
     public DocumentController(
-            DocumentRepository documentRepository,
-            FileStorageService fileStorageService,
-            TextExtractionService textExtractionService
-    ) {
-        this.documentRepository = documentRepository;
-        this.fileStorageService = fileStorageService;
-        this.textExtractionService = textExtractionService;
-    }
+        DocumentRepository documentRepository,
+        FileStorageService fileStorageService,
+        TextExtractionService textExtractionService,
+        DocumentIngestionService documentIngestionService
+) {
+    this.documentRepository = documentRepository;
+    this.fileStorageService = fileStorageService;
+    this.textExtractionService = textExtractionService;
+    this.documentIngestionService = documentIngestionService;
+}
 
     @GetMapping
     public List<Document> getAllDocuments() {
@@ -94,71 +98,105 @@ public ResponseEntity<String> getExtractedText(@PathVariable UUID id) {
 }
 
 
-    @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Document uploadDocument(
-            @RequestPart("file") MultipartFile file
-    ) {
-        validateFile(file);
+    
+@PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+public Document uploadDocument(
+        @RequestPart("file") MultipartFile file
+) {
+    validateFile(file);
 
-        String originalName = file.getOriginalFilename();
-        String safeFileName = Path.of(originalName).getFileName().toString();
+    String originalName = file.getOriginalFilename();
+    String safeFileName = Path.of(originalName).getFileName().toString();
+    String storageFileName;
 
-        String storageFileName;
+    try {
+        storageFileName = fileStorageService.store(file);
+    } catch (IOException exception) {
+        throw new ResponseStatusException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "Unable to store uploaded file.",
+                exception
+        );
+    }
 
-        try {
-            storageFileName = fileStorageService.store(file);
-        } catch (IOException exception) {
-            throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Unable to store uploaded file.",
-                    exception
+    Document savedDocument = null;
+
+    try {
+        Document document = new Document(
+                safeFileName,
+                file.getSize(),
+                file.getContentType(),
+                storageFileName
+        );
+
+        String lowerName = safeFileName.toLowerCase(Locale.ROOT);
+
+        if (lowerName.endsWith(".pdf")
+                || lowerName.endsWith(".txt")
+                || lowerName.endsWith(".md")) {
+
+            Path storedPath = fileStorageService.resolve(storageFileName);
+
+            String extractedText = textExtractionService.extractText(
+                    storedPath,
+                    safeFileName
+            );
+
+            document.setExtractedText(extractedText);
+        }
+
+        savedDocument = documentRepository.save(document);
+
+        if (savedDocument.getExtractedText() != null
+                && !savedDocument.getExtractedText().isBlank()) {
+            documentIngestionService.ingest(
+                    savedDocument,
+                    savedDocument.getExtractedText()
             );
         }
 
-        try {
-            Document document = new Document(
-                    safeFileName,
-                    file.getSize(),
-                    file.getContentType(),
-                    storageFileName
-            );
+        return savedDocument;
 
-            String lowerName = safeFileName.toLowerCase(Locale.ROOT);
+    } catch (IOException | RuntimeException exception) {
 
-            if (lowerName.endsWith(".pdf")
-                    || lowerName.endsWith(".txt")
-                    || lowerName.endsWith(".md")) {
-
-                Path storedPath = fileStorageService.resolve(storageFileName);
-
-                String extractedText = textExtractionService.extractText(
-                        storedPath,
-                        safeFileName
-                );
-
-                document.setExtractedText(extractedText);
-            }
-
-            return documentRepository.save(document);
-
-        } catch (IOException | RuntimeException exception) {
+        // Remove vectors and chunks if ingestion may have partially succeeded.
+        if (savedDocument != null) {
             try {
-                fileStorageService.delete(storageFileName);
-            } catch (IOException cleanupException) {
+                documentIngestionService.deleteVectorsForDocument(
+                        savedDocument
+                );
+            } catch (RuntimeException cleanupException) {
                 exception.addSuppressed(cleanupException);
             }
 
-            if (exception instanceof ResponseStatusException responseException) {
-                throw responseException;
+            try {
+                documentRepository.delete(savedDocument);
+                documentRepository.flush();
+            } catch (RuntimeException cleanupException) {
+                exception.addSuppressed(cleanupException);
             }
-
-            throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Unable to process the uploaded document.",
-                    exception
-            );
         }
+
+        try {
+            fileStorageService.delete(storageFileName);
+        } catch (IOException cleanupException) {
+            exception.addSuppressed(cleanupException);
+        }
+
+        if (exception instanceof ResponseStatusException responseException) {
+            throw responseException;
+        }
+
+        throw new ResponseStatusException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "Unable to process the uploaded document.",
+                exception
+        );
     }
+}
+
+
+
 
     @GetMapping("/{id}/download")
     public ResponseEntity<Resource> downloadDocument(
@@ -203,23 +241,36 @@ public ResponseEntity<String> getExtractedText(@PathVariable UUID id) {
         }
     }
 
-    @DeleteMapping("/{id}")
-    public void deleteDocument(@PathVariable UUID id) {
-        Document document = findDocument(id);
+    
+@DeleteMapping("/{id}")
+public void deleteDocument(@PathVariable UUID id) {
+    Document document = findDocument(id);
 
-        documentRepository.delete(document);
-        documentRepository.flush();
-
-        try {
-            fileStorageService.delete(document.getStorageFileName());
-        } catch (IOException exception) {
-            throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "The database record was deleted, but the stored file could not be removed.",
-                    exception
-            );
-        }
+    try {
+        // Remove embeddings and chunk records first.
+        documentIngestionService.deleteVectorsForDocument(document);
+    } catch (RuntimeException exception) {
+        throw new ResponseStatusException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "Unable to remove the document's vectors and chunks.",
+                exception
+        );
     }
+
+    documentRepository.delete(document);
+    documentRepository.flush();
+
+    try {
+        fileStorageService.delete(document.getStorageFileName());
+    } catch (IOException exception) {
+        throw new ResponseStatusException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "The database record was deleted, but the stored file could not be removed.",
+                exception
+        );
+    }
+}
+
 
     private Document findDocument(UUID id) {
         return documentRepository.findById(id)
