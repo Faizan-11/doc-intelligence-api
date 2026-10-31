@@ -1,14 +1,10 @@
-
 package com.documind.api.service;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.UUID;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -16,22 +12,10 @@ import org.springframework.web.multipart.MultipartFile;
 @Service
 public class FileStorageService {
 
-    private final Path storageDirectory;
+    private final SupabaseStorageService supabaseStorageService;
 
-    public FileStorageService(
-            @Value("${documind.storage.directory:}") String configuredDirectory
-    ) throws IOException {
-        if (configuredDirectory == null || configuredDirectory.isBlank()) {
-            throw new IllegalStateException(
-                    "DocuMind storage directory must be configured."
-            );
-        }
-
-        this.storageDirectory = Path.of(configuredDirectory)
-                .toAbsolutePath()
-                .normalize();
-
-        Files.createDirectories(this.storageDirectory);
+    public FileStorageService(SupabaseStorageService supabaseStorageService) {
+        this.supabaseStorageService = supabaseStorageService;
     }
 
     public String store(MultipartFile file) throws IOException {
@@ -42,43 +26,81 @@ public class FileStorageService {
         );
 
         String extension = "";
-
         int dotIndex = originalName.lastIndexOf('.');
+
         if (dotIndex >= 0 && dotIndex < originalName.length() - 1) {
             extension = originalName.substring(dotIndex).toLowerCase();
         }
 
         String storageFileName = UUID.randomUUID() + extension;
-        Path destination = storageDirectory.resolve(storageFileName)
-                .normalize();
 
-        if (!destination.startsWith(storageDirectory)) {
-            throw new IOException("Invalid storage path.");
-        }
+        String contentType = file.getContentType() == null
+                ? "application/octet-stream"
+                : file.getContentType();
 
-        try (InputStream inputStream = file.getInputStream()) {
-            Files.copy(
-                    inputStream,
-                    destination,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
-        }
+        supabaseStorageService.upload(
+                storageFileName,
+                file.getBytes(),
+                contentType
+        );
 
         return storageFileName;
     }
 
-    public Path resolve(String storageFileName) {
-        Path resolvedPath = storageDirectory.resolve(storageFileName)
-                .normalize();
+    /**
+     * Downloads a temporary copy for text extraction only.
+     */
+    public Path resolve(String storageFileName) throws IOException {
+        validateStorageFileName(storageFileName);
 
-        if (!resolvedPath.startsWith(storageDirectory)) {
-            throw new IllegalArgumentException("Invalid storage filename.");
+        byte[] content = supabaseStorageService.download(storageFileName);
+
+        String suffix = storageFileName.contains(".")
+                ? storageFileName.substring(storageFileName.lastIndexOf('.'))
+                : ".tmp";
+
+        Path temporaryFile = Files.createTempFile("documind-", suffix);
+
+        try {
+            Files.write(temporaryFile, content);
+            return temporaryFile;
+        } catch (IOException exception) {
+            Files.deleteIfExists(temporaryFile);
+            throw exception;
         }
-
-        return resolvedPath;
     }
 
+    /**
+     * Removes the temporary extraction copy.
+     */
+    public void release(Path temporaryFile) throws IOException {
+        if (temporaryFile != null) {
+            Files.deleteIfExists(temporaryFile);
+        }
+    }
+
+    /**
+     * Reads the permanent file directly from Supabase.
+     */
+    public byte[] read(String storageFileName) throws IOException {
+        validateStorageFileName(storageFileName);
+        return supabaseStorageService.download(storageFileName);
+    }
+
+    /**
+     * Deletes the permanent file from Supabase.
+     */
     public void delete(String storageFileName) throws IOException {
-        Files.deleteIfExists(resolve(storageFileName));
+        validateStorageFileName(storageFileName);
+        supabaseStorageService.delete(storageFileName);
+    }
+
+    private void validateStorageFileName(String storageFileName) {
+        if (storageFileName == null
+                || !storageFileName.matches(
+                        "[a-fA-F0-9-]{36}(\\.[a-zA-Z0-9]+)?"
+                )) {
+            throw new IllegalArgumentException("Invalid storage filename.");
+        }
     }
 }
