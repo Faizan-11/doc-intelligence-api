@@ -28,6 +28,9 @@ import com.documind.api.repository.DocumentRepository;
 import com.documind.api.service.FileStorageService;
 import com.documind.api.service.TextExtractionService;
 import com.documind.api.service.DocumentIngestionService;
+import com.documind.api.entity.IngestionStatus;
+
+import com.documind.api.security.AuthenticatedUserService;
 
 @RestController
 @RequestMapping("/api/documents")
@@ -42,23 +45,28 @@ public class DocumentController {
 private final FileStorageService fileStorageService;
 private final TextExtractionService textExtractionService;
 private final DocumentIngestionService documentIngestionService;
+private final AuthenticatedUserService authenticatedUserService;
 
     public DocumentController(
         DocumentRepository documentRepository,
         FileStorageService fileStorageService,
         TextExtractionService textExtractionService,
-        DocumentIngestionService documentIngestionService
+        DocumentIngestionService documentIngestionService,
+        AuthenticatedUserService authenticatedUserService
 ) {
     this.documentRepository = documentRepository;
     this.fileStorageService = fileStorageService;
     this.textExtractionService = textExtractionService;
     this.documentIngestionService = documentIngestionService;
+    this.authenticatedUserService = authenticatedUserService;
 }
 
     @GetMapping
-    public List<Document> getAllDocuments() {
-        return documentRepository.findAll();
-    }
+public List<Document> getAllDocuments() {
+    UUID userId = authenticatedUserService.getCurrentUserId();
+
+    return documentRepository.findAllByOwner_Id(userId);
+}
 
 
 @GetMapping("/search")
@@ -72,9 +80,13 @@ public List<Document> searchDocuments(
         );
     }
 
-    return documentRepository.findByExtractedTextContainingIgnoreCase(
-            keyword.trim()
-    );
+    UUID userId = authenticatedUserService.getCurrentUserId();
+
+    return documentRepository
+            .findByExtractedTextContainingIgnoreCaseAndOwner_Id(
+                    keyword.trim(),
+                    userId
+            );
 }
 
 
@@ -119,16 +131,15 @@ public Document uploadDocument(
         );
     }
 
-    Document savedDocument = null;
+    Document document = new Document(
+            safeFileName,
+            file.getSize(),
+            file.getContentType(),
+            storageFileName
+    );
+    document.setOwner(authenticatedUserService.getCurrentUser());
 
     try {
-        Document document = new Document(
-                safeFileName,
-                file.getSize(),
-                file.getContentType(),
-                storageFileName
-        );
-
         String lowerName = safeFileName.toLowerCase(Locale.ROOT);
 
         if (lowerName.endsWith(".pdf")
@@ -143,40 +154,44 @@ public Document uploadDocument(
             );
 
             document.setExtractedText(extractedText);
+
+        } else {
+            document.setIngestionStatus(IngestionStatus.FAILED);
+            document.setIngestionError(
+                    "Text extraction is not supported for this file type yet."
+            );
         }
 
-        savedDocument = documentRepository.save(document);
+        // Save the document before attempting ingestion.
+        Document savedDocument = documentRepository.save(document);
 
         if (savedDocument.getExtractedText() != null
                 && !savedDocument.getExtractedText().isBlank()) {
-            documentIngestionService.ingest(
-                    savedDocument,
-                    savedDocument.getExtractedText()
-            );
+
+            try {
+                documentIngestionService.ingest(
+                        savedDocument,
+                        savedDocument.getExtractedText()
+                );
+
+                savedDocument.setIngestionError(null);
+
+            } catch (RuntimeException exception) {
+                savedDocument.setIngestionStatus(IngestionStatus.FAILED);
+                savedDocument.setIngestionError(
+                        getErrorMessage(exception)
+                );
+            }
+
+            savedDocument = documentRepository.save(savedDocument);
         }
 
         return savedDocument;
 
     } catch (IOException | RuntimeException exception) {
 
-        // Remove vectors and chunks if ingestion may have partially succeeded.
-        if (savedDocument != null) {
-            try {
-                documentIngestionService.deleteVectorsForDocument(
-                        savedDocument
-                );
-            } catch (RuntimeException cleanupException) {
-                exception.addSuppressed(cleanupException);
-            }
-
-            try {
-                documentRepository.delete(savedDocument);
-                documentRepository.flush();
-            } catch (RuntimeException cleanupException) {
-                exception.addSuppressed(cleanupException);
-            }
-        }
-
+        // Extraction or initial persistence failed.
+        // Remove the stored file because no usable document was saved.
         try {
             fileStorageService.delete(storageFileName);
         } catch (IOException cleanupException) {
@@ -193,6 +208,38 @@ public Document uploadDocument(
                 exception
         );
     }
+}
+
+
+@PostMapping("/{id}/retry")
+public Document retryIngestion(@PathVariable UUID id) {
+
+    Document document = findDocument(id);
+
+    if (document.getExtractedText() == null
+            || document.getExtractedText().isBlank()) {
+
+        throw new ResponseStatusException(
+                HttpStatus.UNPROCESSABLE_ENTITY,
+                "This document has no extracted text available for ingestion."
+        );
+    }
+
+    try {
+        documentIngestionService.ingest(
+                document,
+                document.getExtractedText()
+        );
+
+        document.setIngestionError(null);
+
+    } catch (RuntimeException exception) {
+
+        document.setIngestionStatus(IngestionStatus.FAILED);
+        document.setIngestionError(getErrorMessage(exception));
+    }
+
+    return documentRepository.save(document);
 }
 
 
@@ -272,13 +319,30 @@ public void deleteDocument(@PathVariable UUID id) {
 }
 
 
-    private Document findDocument(UUID id) {
-        return documentRepository.findById(id)
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.NOT_FOUND,
-                        "Document not found"
-                ));
+private String getErrorMessage(Exception exception) {
+
+    String message = exception.getMessage();
+
+    if (message == null || message.isBlank()) {
+        return "An unexpected error occurred during document ingestion.";
     }
+
+    return message.length() > 2000
+            ? message.substring(0, 2000)
+            : message;
+}
+
+
+    private Document findDocument(UUID id) {
+
+    UUID userId = authenticatedUserService.getCurrentUserId();
+
+    return documentRepository.findByIdAndOwner_Id(id, userId)
+            .orElseThrow(() -> new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Document not found"
+            ));
+}
 
     private void validateFile(MultipartFile file) {
         if (file.isEmpty()) {

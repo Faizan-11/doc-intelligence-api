@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import org.springframework.ai.chat.client.ChatClient;
@@ -25,22 +26,48 @@ public class DocumentQaService {
         this.retrievalService = retrievalService;
     }
 
-    public QaResponse ask(String question, int topK) {
-        if (question == null || question.isBlank()) {
-            throw new IllegalArgumentException(
-                    "Question must not be blank."
-            );
-        }
+    public QaResponse ask(
+            String question,
+            int topK,
+            UUID userId
+    ) {
+        validateSearchParameters(question, topK);
 
-        if (topK < 1 || topK > 20) {
+        List<Document> retrievedDocuments =
+                retrievalService.search(question, topK, userId);
+
+        return generateAnswer(question, retrievedDocuments);
+    }
+
+    public QaResponse askByDocument(
+            String question,
+            int topK,
+            UUID documentId,
+            UUID userId
+    ) {
+        validateSearchParameters(question, topK);
+
+        if (documentId == null) {
             throw new IllegalArgumentException(
-                    "topK must be between 1 and 20."
+                    "Document ID must not be null."
             );
         }
 
         List<Document> retrievedDocuments =
-                retrievalService.search(question, topK);
+                retrievalService.searchByDocument(
+                        question,
+                        topK,
+                        documentId,
+                        userId
+                );
 
+        return generateAnswer(question, retrievedDocuments);
+    }
+
+    private QaResponse generateAnswer(
+            String question,
+            List<Document> retrievedDocuments
+    ) {
         if (retrievedDocuments.isEmpty()) {
             return new QaResponse(
                     "I couldn't find relevant information in the uploaded documents to answer this question.",
@@ -79,9 +106,11 @@ public class DocumentQaService {
                         """)
                 .user(user -> user.text("""
                         Question:
+
                         {question}
 
                         Retrieved document context:
+
                         {context}
                         """)
                         .param("question", question.trim())
@@ -105,6 +134,23 @@ public class DocumentQaService {
                         : answer.trim(),
                 new ArrayList<>(uniqueSources)
         );
+    }
+
+    private void validateSearchParameters(
+            String question,
+            int topK
+    ) {
+        if (question == null || question.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Question must not be blank."
+            );
+        }
+
+        if (topK < 1 || topK > 20) {
+            throw new IllegalArgumentException(
+                    "topK must be between 1 and 20."
+            );
+        }
     }
 
     public record QaResponse(

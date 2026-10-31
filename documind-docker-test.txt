@@ -1,0 +1,11 @@
+DocuMind Docker Integration Test
+
+DocuMind is an AI-powered document intelligence application.
+
+The backend uses Java 21, Spring Boot, PostgreSQL, and PGVector.
+The frontend uses Angular and TypeScript.
+
+The application supports document ingestion, text extraction,
+semantic search, and retrieval-augmented question answering.
+
+This synthetic document is created only to verify Docker deployment.
