@@ -125,13 +125,18 @@ public class SupabaseStorageService {
             );
 
             if (response.statusCode() < 200
-                    || response.statusCode() >= 300) {
-                throw new IOException(
-                        "Supabase " + operation
-                                + " failed with HTTP "
-                                + response.statusCode()
-                );
-            }
+        || response.statusCode() >= 300) {
+
+    String errorMessage =
+            "Supabase " + operation
+                    + " failed with HTTP "
+                    + response.statusCode()
+                    + ": " + response.body();
+
+    System.err.println(errorMessage);
+
+    throw new IOException(errorMessage);
+}
 
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
