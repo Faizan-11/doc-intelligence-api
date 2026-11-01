@@ -23,7 +23,7 @@ public class SupabaseStorageService {
 
     public SupabaseStorageService(
             @Value("${supabase.url:}") String projectUrl,
-            @Value("${supabase.secret-key:}") String secretKey,
+            @Value("${supabase.secret.key:}") String secretKey,
             @Value("${supabase.bucket:documind-documents}") String bucket
     ) {
         this.projectUrl = projectUrl;
